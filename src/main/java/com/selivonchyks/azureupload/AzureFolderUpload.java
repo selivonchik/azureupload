@@ -46,7 +46,7 @@ public class AzureFolderUpload {
 	static final String THREADS_COUNT_ARG_NAME = "threads";
 	static final String TARGET_AZURE_CONTAINER_ARG_NAME = "container";
 	static final String SOURCE_FOLDER_ARG_NAME = "source";
-	
+
 	static final String AZURE_CONNECTION_STRING_PROPERTY_NAME = "connectionString";
 
 	@SuppressWarnings("static-access")
@@ -97,7 +97,7 @@ public class AzureFolderUpload {
 		// parse the command line arguments
 		return parser.parse(options, args);
 	}
-	
+
 	private static Configuration readConfiguration(String configFile) throws ConfigurationException {
 		logger.info("Reading configuration from {}", configFile);
 		return new PropertiesConfiguration(configFile);
@@ -127,71 +127,71 @@ public class AzureFolderUpload {
 			if (files != null && !files.isEmpty()) {
 				final int filesCount = files.size();
 				logger.debug("Found [{}] files in source folder [{}]", filesCount, sourcePath);
-	
-		        ExecutorService exec = Executors.newFixedThreadPool(uploadThreadsCount);
-		        try {
-		            CloudStorageAccount storageAccount = CloudStorageAccount.parse(azureConnectionString);
-		            CloudBlobClient blobClient = storageAccount.createCloudBlobClient();
-		            final CloudBlobContainer container = blobClient.getContainerReference(targetContainer);
-		            container.createIfNotExists();
-	
-        			final BlobRequestOptions blobRequestOptions = new BlobRequestOptions();
-        			blobRequestOptions.setUseTransactionalContentMD5(true);
-        			final OperationContext operationContext = new OperationContext();
-        			operationContext.setLogger(logger);
-        			//operationContext.setLoggingEnabled(true);
 
-        			logger.info("Starting uploading folder [{}] to azure container [{}] using [{}] threads ...", sourceFolder, container.getUri(), uploadThreadsCount);
+				ExecutorService exec = Executors.newFixedThreadPool(uploadThreadsCount);
+				try {
+					CloudStorageAccount storageAccount = CloudStorageAccount.parse(azureConnectionString);
+					CloudBlobClient blobClient = storageAccount.createCloudBlobClient();
+					final CloudBlobContainer container = blobClient.getContainerReference(targetContainer);
+					container.createIfNotExists();
 
-		            for(final File file : files) {
-		                exec.submit(new Runnable() {
-		                    @Override
-		                    public void run() {
-		                        String blobItem = null;
-		                        try {
-		                        	byte[] md5 = DigestUtils.md5(new FileInputStream(file));
-		                        	String md5HashBase64 = Base64.encode(md5);
+					final BlobRequestOptions blobRequestOptions = new BlobRequestOptions();
+					blobRequestOptions.setUseTransactionalContentMD5(true);
+					final OperationContext operationContext = new OperationContext();
+					operationContext.setLogger(logger);
+					// operationContext.setLoggingEnabled(true);
 
-		                            blobItem = sourceFolderUri.relativize(file.toURI()).getPath(); 
+					logger.info("Starting uploading folder [{}] to azure container [{}] using [{}] threads ...", sourceFolder, container.getUri(), uploadThreadsCount);
 
-		                            long fileUploadStartTime = System.currentTimeMillis();
-		                            CloudBlockBlob blob = container.getBlockBlobReference(blobItem);
-		                            
-		                            blob.upload(new FileInputStream(file), file.length(), null, blobRequestOptions, operationContext);
-		                			String uploadedFileHash = blob.getProperties().getContentMD5();
-		                			if (!StringUtils.equals(md5HashBase64, uploadedFileHash)) {
-		                				try {
-		                					blob.deleteIfExists();
-		                				} catch (Exception e) {
-		                					logger.info(String.format("Failed to delete broken blob [%s]", blob.getUri().toString()), e);
-		                				}
-		                				throw new IOException(String.format("Uploaded file [%s] has wrong hash [%s] but expected [%s]", blob.getUri().toString(), uploadedFileHash, md5HashBase64));
-		                			}
+					for (final File file : files) {
+						exec.submit(new Runnable() {
+							@Override
+							public void run() {
+								String blobItem = null;
+								try {
+									byte[] md5 = DigestUtils.md5(new FileInputStream(file));
+									String md5HashBase64 = Base64.encode(md5);
 
-		                            uploadedFilesCount++;
-		                            uploadedFilesSize += file.length();
-		                            logger.info("Uploaded file [{}] in [{}] ms, totally uploaded [{}] file of [{}]", file, System.currentTimeMillis() - fileUploadStartTime, uploadedFilesCount, filesCount);
-		                        } catch (IOException | URISyntaxException | StorageException e) {
-		                        	logger.warn(String.format("Failed to upload file [%s]", file), e);
-		                        }
-		                    }
-		                });
-		            }
-		        } catch (InvalidKeyException | URISyntaxException | StorageException e) {
-		        	logger.warn("Upload failed", e);
-		            System.exit(1);
-		        } finally {
-		            exec.shutdown();
-		        }
-	
-		        try {
-		            exec.awaitTermination(31,TimeUnit.DAYS);
-		        } catch (InterruptedException ex) {
-		        	logger.error("Upload failed", ex);
-		            System.exit(1);
-		        }
-		        
-		        logger.info("Finished uploading [{}] files of total size [{}] bytes in [{}] s", uploadedFilesCount, uploadedFilesSize, (System.currentTimeMillis() - startTime) / 1000);
+									blobItem = sourceFolderUri.relativize(file.toURI()).getPath();
+
+									long fileUploadStartTime = System.currentTimeMillis();
+									CloudBlockBlob blob = container.getBlockBlobReference(blobItem);
+
+									blob.upload(new FileInputStream(file), file.length(), null, blobRequestOptions, operationContext);
+									String uploadedFileHash = blob.getProperties().getContentMD5();
+									if (!StringUtils.equals(md5HashBase64, uploadedFileHash)) {
+										try {
+											blob.deleteIfExists();
+										} catch (Exception e) {
+											logger.info(String.format("Failed to delete broken blob [%s]", blob.getUri().toString()), e);
+										}
+										throw new IOException(String.format("Uploaded file [%s] has wrong hash [%s] but expected [%s]", blob.getUri().toString(), uploadedFileHash, md5HashBase64));
+									}
+
+									uploadedFilesCount++;
+									uploadedFilesSize += file.length();
+									logger.info("Uploaded file [{}] in [{}] ms, totally uploaded [{}] file of [{}]", file, System.currentTimeMillis() - fileUploadStartTime, uploadedFilesCount, filesCount);
+								} catch (IOException | URISyntaxException | StorageException e) {
+									logger.warn(String.format("Failed to upload file [%s]", file), e);
+								}
+							}
+						});
+					}
+				} catch (InvalidKeyException | URISyntaxException | StorageException e) {
+					logger.warn("Upload failed", e);
+					System.exit(1);
+				} finally {
+					exec.shutdown();
+				}
+
+				try {
+					exec.awaitTermination(31, TimeUnit.DAYS);
+				} catch (InterruptedException ex) {
+					logger.error("Upload failed", ex);
+					System.exit(1);
+				}
+
+				logger.info("Finished uploading [{}] files of total size [{}] bytes in [{}] s", uploadedFilesCount, uploadedFilesSize, (System.currentTimeMillis() - startTime) / 1000);
 			} else {
 				logger.info("Specified source [{}] folder doesn't contain any files");
 			}
@@ -199,7 +199,7 @@ public class AzureFolderUpload {
 			logger.warn(String.format("Failed to upload folder [%s] to azure container [%s] using [%d] threads and connection string [%s]", sourcePath, targetContainer, uploadThreadsCount, azureConnectionString), e);
 		}
 	}
-	
+
 	public static void main(String[] args) {
 		String configFileLocation = DEFAULT_CONFIG_FILE;
 		Options options = buildCommandLineOptions();
@@ -211,7 +211,7 @@ public class AzureFolderUpload {
 					configFileLocation = tmp;
 				}
 			}
-			
+
 			Configuration configuration = readConfiguration(configFileLocation);
 			String azureConnectionString = configuration.getString(AZURE_CONNECTION_STRING_PROPERTY_NAME);
 			uploadFolder(
@@ -231,4 +231,3 @@ public class AzureFolderUpload {
 		}
 	}
 }
-
