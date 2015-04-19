@@ -3,6 +3,7 @@ package com.selivonchyks.azureupload;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.security.InvalidKeyException;
@@ -46,6 +47,7 @@ public class AzureFolderUpload {
 	static final String THREADS_COUNT_ARG_NAME = "threads";
 	static final String TARGET_AZURE_CONTAINER_ARG_NAME = "container";
 	static final String SOURCE_FOLDER_ARG_NAME = "source";
+	static final String IN_MEMORY_ARG_NAME = "inMemory";
 
 	static final String AZURE_CONNECTION_STRING_PROPERTY_NAME = "connectionString";
 
@@ -86,6 +88,14 @@ public class AzureFolderUpload {
 					.isRequired(true)
 					.create()
 		);
+		options.addOption(
+				OptionBuilder
+					.withLongOpt(IN_MEMORY_ARG_NAME)
+					.hasArg(false)
+					.withDescription("allow in memory file handling")
+					.isRequired(false)
+					.create()
+		);
 
 		return options;
 	}
@@ -105,7 +115,7 @@ public class AzureFolderUpload {
 
 	private static volatile int uploadedFilesCount = 0;
 	private static volatile long uploadedFilesSize = 0;
-	private static void uploadFolder(String azureConnectionString, String sourcePath, String targetContainer, int uploadThreadsCount) {
+	private static void uploadFolder(final String azureConnectionString, final String sourcePath, final String targetContainer, final int uploadThreadsCount, final boolean allowInMemoryFileHandling) {
 		try {
 			if (StringUtils.isBlank(azureConnectionString)) {
 				throw new IllegalArgumentException("Failed to proceed: azure connection string is empty, check properties file");
@@ -149,7 +159,11 @@ public class AzureFolderUpload {
 							public void run() {
 								String blobItem = null;
 								try {
-									byte[] md5 = DigestUtils.md5(new FileInputStream(file));
+									ContentHolder contentHolder = new ContentHolder(file, allowInMemoryFileHandling);
+									byte[] md5 = null;
+									try (InputStream is = contentHolder.getInputStream()) {
+										md5 = DigestUtils.md5(new FileInputStream(file));
+									}
 									String md5HashBase64 = Base64.encode(md5);
 
 									blobItem = sourceFolderUri.relativize(file.toURI()).getPath();
@@ -157,7 +171,9 @@ public class AzureFolderUpload {
 									long fileUploadStartTime = System.currentTimeMillis();
 									CloudBlockBlob blob = container.getBlockBlobReference(blobItem);
 
-									blob.upload(new FileInputStream(file), file.length(), null, blobRequestOptions, operationContext);
+									try (InputStream is = contentHolder.getInputStream()) {
+										blob.upload(is, contentHolder.getLength(), null, blobRequestOptions, operationContext);
+									}
 									String uploadedFileHash = blob.getProperties().getContentMD5();
 									if (!StringUtils.equals(md5HashBase64, uploadedFileHash)) {
 										try {
@@ -169,7 +185,7 @@ public class AzureFolderUpload {
 									}
 
 									uploadedFilesCount++;
-									uploadedFilesSize += file.length();
+									uploadedFilesSize += contentHolder.getLength();
 									logger.info("Uploaded file [{}] in [{}] ms, totally uploaded [{}] file of [{}]", file, System.currentTimeMillis() - fileUploadStartTime, uploadedFilesCount, filesCount);
 								} catch (IOException | URISyntaxException | StorageException e) {
 									logger.warn(String.format("Failed to upload file [%s]", file), e);
@@ -218,12 +234,12 @@ public class AzureFolderUpload {
 					azureConnectionString, 
 					commandLine.getOptionValue(SOURCE_FOLDER_ARG_NAME),
 					commandLine.getOptionValue(TARGET_AZURE_CONTAINER_ARG_NAME),
-					NumberUtils.toInt(commandLine.getOptionValue(THREADS_COUNT_ARG_NAME))
+					NumberUtils.toInt(commandLine.getOptionValue(THREADS_COUNT_ARG_NAME)), false
 			);
 		} catch (ParseException exp) {
 			logger.warn(exp.getMessage());
 			HelpFormatter formatter = new HelpFormatter();
-			formatter.printHelp("ant", options);
+			formatter.printHelp("azureupload", options);
 		} catch (ConfigurationException e) {
 			logger.warn(String.format("Failed to read configuration from %s", configFileLocation), e);
 		} catch (Exception e) {
