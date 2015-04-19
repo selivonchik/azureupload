@@ -21,11 +21,6 @@
 			<version>1.2</version>
 		</dependency>
 		<dependency>
-			<groupId>org.slf4j</groupId>
-			<artifactId>slf4j-api</artifactId>
-			<version>1.7.11</version>
-		</dependency>
-		<dependency>
 			<groupId>org.apache.logging.log4j</groupId>
 			<artifactId>log4j-api</artifactId>
 			<version>2.2</version>
@@ -102,16 +97,29 @@
 				</configuration>
 			</plugin>
 			<plugin>
-				<artifactId>maven-shade-plugin</artifactId>
-				<version>2.3</version>
+				<artifactId>maven-assembly-plugin</artifactId>
+				<version>2.5.3</version>
 				<configuration>
 					<finalName>${project.artifactId}</finalName>
+					<descriptorRefs>
+						<descriptorRef>jar-with-dependencies</descriptorRef>
+					</descriptorRefs>
+					<archive>
+						<manifest>
+							<addClasspath>true</addClasspath>
+							<!-- 
+							<classpathPrefix>${lib.dir}/</classpathPrefix>
+							-->
+							<mainClass>com.selivonchyks.azureupload.AzureFolderUpload</mainClass>
+						</manifest>
+					</archive>
 				</configuration>
 				<executions>
 					<execution>
+						<id>make-assembly</id>
 						<phase>package</phase>
 						<goals>
-							<goal>shade</goal>
+							<goal>single</goal>
 						</goals>
 					</execution>
 				</executions>
