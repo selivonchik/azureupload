@@ -16,6 +16,7 @@ import java.util.Date;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.commons.cli.BasicParser;
 import org.apache.commons.cli.CommandLine;
@@ -308,10 +309,13 @@ public class AzureFolderUpload {
 	}
 	
 	private static Collection<File> listFiles(final File directory, final String markerFileName) {
+		Collection<File> files = null;
+		final AtomicInteger skippedFilesCount = new AtomicInteger(0);
+		long startTime = System.currentTimeMillis();
 		if (StringUtils.isBlank(markerFileName)) {
-			return FileUtils.listFiles(directory, null, true);
+			files = FileUtils.listFiles(directory, null, true);
 		} else {
-			return FileUtils.listFiles(
+			files = FileUtils.listFiles(
 					directory, 
 					new IOFileFilter() {
 						@Override
@@ -330,13 +334,16 @@ public class AzureFolderUpload {
 										return true;
 									}
 								} while (parentFolder != null && !parentFolder.equals(directory));
+								skippedFilesCount.incrementAndGet();
 							}
-							return true;
+							return false;
 						}
 					},
 					TrueFileFilter.INSTANCE
 			);
 		}
+		logger.info("Found [{}] files in folder [{}] using marker file [{}] (skipped [{}] files), it took [{}] ms", files != null ? files.size() : 0, directory, markerFileName, skippedFilesCount.intValue(), System.currentTimeMillis() - startTime);
+		return files;
 	}
 
 	private static void prepareUploadLogSchema() {
