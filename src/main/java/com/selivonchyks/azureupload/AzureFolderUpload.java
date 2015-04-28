@@ -202,7 +202,7 @@ public class AzureFolderUpload {
 			if (uploadThreadsCount < 1) {
 				throw new IllegalArgumentException(String.format("Failed to proceed: specified upload threads count %d is less than 1", uploadThreadsCount));
 			}
-			
+
 			long startTime = System.currentTimeMillis();
 			final File sourceFolder = new File(sourcePath);
 			final URI sourceFolderUri = sourceFolder.toURI();
@@ -236,16 +236,22 @@ public class AzureFolderUpload {
 								public void run() {
 									String blobItem = null;
 									try {
+										String filePath = file.getAbsolutePath();
+										long fileSize = file.length();
+										long lastModificationDate = file.lastModified();
+
+										if (checkFileHasBeenAlreadyUploaded(filePath, fileSize, lastModificationDate, null)) {
+											++skippedFilesCount;
+											logger.info("Skipping file [{}], it has been already uploaded", filePath);
+											return;
+										}
+
 										ContentHolder contentHolder = new ContentHolder(file, allowInMemoryFileHandling);
 										byte[] md5 = null;
 										try (InputStream is = contentHolder.getInputStream()) {
 											md5 = DigestUtils.md5(new FileInputStream(file));
 										}
 										String md5HashBase64 = Base64.encode(md5);
-
-										String filePath = file.getAbsolutePath();
-										long fileSize = contentHolder.getLength();
-										long lastModificationDate = file.lastModified();
 
 										if (checkFileHasBeenAlreadyUploaded(filePath, fileSize, lastModificationDate, md5)) {
 											++skippedFilesCount;
@@ -405,16 +411,28 @@ public class AzureFolderUpload {
 
 	private static boolean checkFileHasBeenAlreadyUploaded(final String path, final long size, final long lastModificationDate, final byte[] hash) {
 		if (uploadLogItems != null && !uploadLogItems.isEmpty()) {
-			final String hashHex = Hex.encodeHexString(hash);
+			String hashHexTmp = null;
+			if (hash != null && hash.length > 0) {
+				hashHexTmp = Hex.encodeHexString(hash);
+			}
+			final String hashHex = hashHexTmp;
 			UploadedFileLogItem uploadedFileLogItem = CollectionUtils.find(uploadLogItems, new Predicate<UploadedFileLogItem>() {
 				@Override
 				public boolean evaluate(UploadedFileLogItem item) {
-					if (StringUtils.equalsIgnoreCase(path, item.getPath()) && 
-						StringUtils.equals(hashHex, item.getHash()) &&
-						lastModificationDate <= item.getLast_modification() &&
-						size == item.getSize()
-					) {
-						return true; 
+					if (StringUtils.isNotBlank(hashHex)) {
+						if (StringUtils.equalsIgnoreCase(path, item.getPath()) &&
+							StringUtils.equals(hashHex, item.getHash()) &&
+							size == item.getSize()
+						) {
+							return true;
+						}
+					} else {
+						if (StringUtils.equalsIgnoreCase(path, item.getPath()) &&
+							lastModificationDate == item.getLast_modification() &&
+							size == item.getSize()
+						) {
+							return true;
+						}
 					}
 					return false;
 				}
