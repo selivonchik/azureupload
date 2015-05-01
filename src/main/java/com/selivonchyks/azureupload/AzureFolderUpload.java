@@ -10,11 +10,16 @@ import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.nio.file.StandardOpenOption;
 import java.security.InvalidKeyException;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
+import java.util.Queue;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -208,6 +213,7 @@ public class AzureFolderUpload {
 			final URI sourceFolderUri = sourceFolder.toURI();
 			final Collection<File> files = listFiles(sourceFolder, folderReadyMarkerFileName);
 			if (files != null && !files.isEmpty()) {
+				final Queue<File> queuedFiles = new ConcurrentLinkedQueue<File>(files);
 				final int filesCount = files.size();
 				logger.debug("Found [{}] files in source folder [{}]", filesCount, sourcePath);
 
@@ -229,67 +235,85 @@ public class AzureFolderUpload {
 						// operationContext.setLoggingEnabled(true);
 	
 						logger.info("Starting uploading folder [{}] to azure container [{}] using [{}] threads ...", sourceFolder, container.getUri(), uploadThreadsCount);
-	
-						for (final File file : files) {
-							exec.submit(new Runnable() {
+
+						Collection<Callable<Void>> tasks = new ArrayList<Callable<Void>>();
+						for(int i = 0; i < uploadThreadsCount; ++i) {
+							tasks.add(new Callable<Void>() {
 								@Override
-								public void run() {
-									String blobItem = null;
-									try {
-										String filePath = file.getAbsolutePath();
-										long fileSize = file.length();
-										long lastModificationDate = file.lastModified();
-
-										if (checkFileHasBeenAlreadyUploaded(filePath, fileSize, lastModificationDate, null)) {
-											++skippedFilesCount;
-											logger.info("Skipping file [{}], it has been already uploaded", filePath);
-											return;
-										}
-
-										ContentHolder contentHolder = new ContentHolder(file, allowInMemoryFileHandling);
-										byte[] md5 = null;
-										try (InputStream is = contentHolder.getInputStream()) {
-											md5 = DigestUtils.md5(new FileInputStream(file));
-										}
-										String md5HashBase64 = Base64.encode(md5);
-
-										if (checkFileHasBeenAlreadyUploaded(filePath, fileSize, lastModificationDate, md5)) {
-											++skippedFilesCount;
-											logger.info("Skipping file [{}], it has been already uploaded", filePath);
-											return;
-										}
-
-										blobItem = sourceFolderUri.relativize(file.toURI()).getPath();
-										if (StringUtils.isNotBlank(targetFolder)) {
-											blobItem = FilenameUtils.normalize(String.format("%s/%s", targetFolder, blobItem), true);
-										}
-	
-										long fileUploadStartTime = System.currentTimeMillis();
-										CloudBlockBlob blob = container.getBlockBlobReference(blobItem);
-	
-										try (InputStream is = contentHolder.getInputStream()) {
-											blob.upload(is, fileSize, null, blobRequestOptions, operationContext);
-										}
-										String uploadedFileHash = blob.getProperties().getContentMD5();
-										if (!StringUtils.equals(md5HashBase64, uploadedFileHash)) {
-											try {
-												blob.deleteIfExists();
-											} catch (Exception e) {
-												logger.info(String.format("Failed to delete broken blob [%s]", blob.getUri().toString()), e);
+								public Void call() throws Exception {
+									int threadUploadedFilesCount = 0;
+									long threadUploadedFilesSize = 0;
+									File file = null;
+									do {
+										try {
+											file = queuedFiles.poll();
+											if (file == null) {
+												break;
 											}
-											throw new IOException(String.format("Uploaded file [%s] has wrong hash [%s] but expected [%s]", blob.getUri().toString(), uploadedFileHash, md5HashBase64));
+											String filePath = file.getAbsolutePath();
+											long fileSize = file.length();
+											long lastModificationDate = file.lastModified();
+
+											if (checkFileHasBeenAlreadyUploaded(filePath, fileSize, lastModificationDate, null)) {
+												++skippedFilesCount;
+												logger.info("Skipping file [{}], it has been already uploaded", filePath);
+												continue;
+											}
+
+											ContentHolder contentHolder = new ContentHolder(file, allowInMemoryFileHandling);
+											byte[] md5 = null;
+											try (InputStream is = contentHolder.getInputStream()) {
+												md5 = DigestUtils.md5(new FileInputStream(file));
+											}
+											String md5HashBase64 = Base64.encode(md5);
+
+											if (checkFileHasBeenAlreadyUploaded(filePath, fileSize, lastModificationDate, md5)) {
+												++skippedFilesCount;
+												logger.info("Skipping file [{}], it has been already uploaded", filePath);
+												continue;
+											}
+
+											String blobItem = sourceFolderUri.relativize(file.toURI()).getPath();
+											if (StringUtils.isNotBlank(targetFolder)) {
+												blobItem = FilenameUtils.normalize(String.format("%s/%s", targetFolder, blobItem), true);
+											}
+		
+											long fileUploadStartTime = System.currentTimeMillis();
+											CloudBlockBlob blob = container.getBlockBlobReference(blobItem);
+		
+											try (InputStream is = contentHolder.getInputStream()) {
+												blob.upload(is, fileSize, null, blobRequestOptions, operationContext);
+											}
+											String uploadedFileHash = blob.getProperties().getContentMD5();
+											if (!StringUtils.equals(md5HashBase64, uploadedFileHash)) {
+												try {
+													blob.deleteIfExists();
+												} catch (Exception e) {
+													logger.info(String.format("Failed to delete broken blob [%s]", blob.getUri().toString()), e);
+												}
+												throw new IOException(String.format("Uploaded file [%s] has wrong hash [%s] but expected [%s]", blob.getUri().toString(), uploadedFileHash, md5HashBase64));
+											}
+		
+											++uploadedFilesCount;
+											++threadUploadedFilesCount;
+											uploadedFilesSize += fileSize;
+											threadUploadedFilesSize += fileSize;
+											logger.info("Uploaded file [{}] to [{}] in [{}] ms, totally uploaded [{}] files of [{}] ([{}] skipped), uploaded files size [{}]", file, blob.getUri(), System.currentTimeMillis() - fileUploadStartTime, uploadedFilesCount, filesCount, skippedFilesCount, uploadedFilesSize);
+		
+											logUpload(writer, filePath, fileSize, md5, System.currentTimeMillis(), lastModificationDate);
+										} catch (Exception e) {
+											logger.warn(String.format("Failed to upload file [%s]", file), e);
 										}
-	
-										uploadedFilesCount++;
-										uploadedFilesSize += fileSize;
-										logger.info("Uploaded file [{}] to [{}] in [{}] ms, totally uploaded [{}] files of [{}] ([{}] skipped)", file, blob.getUri(), System.currentTimeMillis() - fileUploadStartTime, uploadedFilesCount, filesCount, skippedFilesCount);
-	
-										logUpload(writer, filePath, fileSize, md5, System.currentTimeMillis(), lastModificationDate);
-									} catch (IOException | URISyntaxException | StorageException e) {
-										logger.warn(String.format("Failed to upload file [%s]", file), e);
-									}
+									} while (true);
+									logger.info("Thread [{}] uploaded [{}] files of total size [{}]", Thread.currentThread().getName(), threadUploadedFilesCount, threadUploadedFilesSize);
+									return null;
 								}
 							});
+						}
+
+						Collection<Future<Void>> tasksResult = exec.invokeAll(tasks);
+						for(Future<Void> result : tasksResult) {
+							result.get();
 						}
 					} catch (InvalidKeyException | URISyntaxException | StorageException e) {
 						logger.warn("Upload failed", e);
