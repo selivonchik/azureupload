@@ -1,5 +1,6 @@
 package com.selivonchyks.azureupload;
 
+import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -48,7 +49,6 @@ import org.apache.commons.lang3.math.NumberUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.fasterxml.jackson.databind.MappingIterator;
 import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.ObjectWriter;
 import com.fasterxml.jackson.dataformat.csv.CsvMapper;
@@ -209,6 +209,10 @@ public class AzureFolderUpload {
 			}
 
 			long startTime = System.currentTimeMillis();
+
+			prepareUploadLogSchema();
+			readUploadLog(skipUploadedFilePath);
+
 			final File sourceFolder = new File(sourcePath);
 			final URI sourceFolderUri = sourceFolder.toURI();
 			final Collection<File> files = listFiles(sourceFolder, folderReadyMarkerFileName);
@@ -216,10 +220,6 @@ public class AzureFolderUpload {
 				final Queue<File> queuedFiles = new ConcurrentLinkedQueue<File>(files);
 				final int filesCount = files.size();
 				logger.debug("Found [{}] files in source folder [{}]", filesCount, sourcePath);
-
-				prepareUploadLogSchema();
-				readUploadLog(skipUploadedFilePath);
-
 				try (Writer writer = prepareUploadLogWriter(uploadLogFilePath)) {
 					ExecutorService exec = Executors.newFixedThreadPool(uploadThreadsCount);
 					try {
@@ -227,13 +227,13 @@ public class AzureFolderUpload {
 						CloudBlobClient blobClient = storageAccount.createCloudBlobClient();
 						final CloudBlobContainer container = blobClient.getContainerReference(targetContainer);
 						container.createIfNotExists();
-	
+
 						final BlobRequestOptions blobRequestOptions = new BlobRequestOptions();
 						blobRequestOptions.setUseTransactionalContentMD5(true);
 						final OperationContext operationContext = new OperationContext();
 						operationContext.setLogger(logger);
 						// operationContext.setLoggingEnabled(true);
-	
+
 						logger.info("Starting uploading folder [{}] to azure container [{}] using [{}] threads ...", sourceFolder, container.getUri(), uploadThreadsCount);
 
 						Collection<Callable<Void>> tasks = new ArrayList<Callable<Void>>();
@@ -389,8 +389,18 @@ public class AzureFolderUpload {
 			try {
 				File uploadLogFile = new File(path);
 				if (uploadLogFile.exists()) {
-					MappingIterator<UploadedFileLogItem> it = csvObjectReader.readValues(uploadLogFile);
-					uploadLogItems = Collections.synchronizedList(it.readAll());
+					uploadLogItems = new ArrayList<UploadedFileLogItem>();
+					try (InputStream is = new BufferedInputStream(new FileInputStream(uploadLogFile))) {
+						for(String s : IOUtils.readLines(is)) {
+							try {
+								UploadedFileLogItem logItem = csvObjectReader.readValue(s);
+								uploadLogItems.add(logItem);
+							} catch (Exception e) {
+								logger.warn(String.format("Failed to parse upload log item\n%s", s), e);
+							}
+						}
+					}
+					uploadLogItems = Collections.synchronizedCollection(uploadLogItems);
 					logger.info("Read [{}] upload log items from [{}] in [{}] ms", uploadLogItems.size(), uploadLogFile, System.currentTimeMillis() - startTime);
 				}
 			} catch (Exception e) {
