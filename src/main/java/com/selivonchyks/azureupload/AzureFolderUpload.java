@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.Queue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -23,6 +24,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.commons.cli.BasicParser;
 import org.apache.commons.cli.CommandLine;
@@ -84,6 +86,7 @@ public class AzureFolderUpload {
 	private static ObjectWriter csvObjectWriter;
 	private static ObjectReader csvObjectReader;
 	private static Collection<UploadedFileLogItem> uploadLogItems;
+	private static Collection<String> uploadLogItemPaths;
 
 	@SuppressWarnings("static-access")
 	private static Options buildCommandLineOptions() {
@@ -179,17 +182,23 @@ public class AzureFolderUpload {
 		return new PropertiesConfiguration(configFile);
 	}
 
-	private static volatile int uploadedFilesCount = 0;
-	private static volatile int skippedFilesCount = 0;
-	private static volatile long uploadedFilesSize = 0;
+	private static volatile AtomicLong uploadedFilesCount = new AtomicLong(0);
+	private static volatile AtomicInteger skippedFilesCount = new AtomicInteger(0);
+	private static volatile AtomicLong uploadedFilesSize = new AtomicLong(0);
+
+	private static volatile AtomicLong fileSizeReadingTotalTime = new AtomicLong(0);
+	private static volatile AtomicLong fileSizeReadingTotalCount = new AtomicLong(0);
+
+	private static volatile AtomicLong fileMetadataReadingTotalTime = new AtomicLong(0);
+	private static volatile AtomicLong fileMetadataReadingTotalCount = new AtomicLong(0);
 
 	private static void uploadFolder(
-			final String azureConnectionString, 
-			final String sourcePath, 
-			final String targetContainer, 
+			final String azureConnectionString,
+			final String sourcePath,
+			final String targetContainer,
 			final String targetFolder,
-			final int uploadThreadsCount, 
-			final boolean allowInMemoryFileHandling, 
+			final int uploadThreadsCount,
+			final boolean allowInMemoryFileHandling,
 			final String uploadLogFilePath,
 			final String skipUploadedFilePath,
 			final String folderReadyMarkerFileName
@@ -218,6 +227,7 @@ public class AzureFolderUpload {
 			final Collection<File> files = listFiles(sourceFolder, folderReadyMarkerFileName);
 			if (files != null && !files.isEmpty()) {
 				final Queue<File> queuedFiles = new ConcurrentLinkedQueue<File>(files);
+				final Queue<File> temporarilySkippedFiles = new ConcurrentLinkedQueue<File>(files);
 				final int filesCount = files.size();
 				logger.debug("Found [{}] files in source folder [{}]", filesCount, sourcePath);
 				try (Writer writer = prepareUploadLogWriter(uploadLogFilePath)) {
@@ -246,17 +256,44 @@ public class AzureFolderUpload {
 									File file = null;
 									do {
 										try {
+											String filePath = null;
 											file = queuedFiles.poll();
 											if (file == null) {
-												break;
+												file = temporarilySkippedFiles.poll();
+												if (file == null) {
+													break;
+												} else {
+													long fileMetadataReadingStartTime = System.nanoTime();
+													filePath = file.getAbsolutePath();
+													fileMetadataReadingTotalTime.addAndGet(System.nanoTime() - fileMetadataReadingStartTime);
+												}
+											} else {
+												long fileMetadataReadingStartTime = System.nanoTime();
+												filePath = file.getAbsolutePath();
+												long fileMetadataReadingTime = System.nanoTime() - fileMetadataReadingStartTime;
+												if (uploadLogItemPaths.contains(filePath)) {
+													temporarilySkippedFiles.add(file);
+													continue;
+												}
+												fileMetadataReadingTotalTime.addAndGet(fileMetadataReadingTime);
 											}
-											String filePath = file.getAbsolutePath();
-											long fileSize = file.length();
+
+											long fileMetadataReadingStartTime = System.nanoTime();
+											long fileSizeReadingStartTime = System.nanoTime();
+											long fileSize = -1;
+											try (FileInputStream is = new FileInputStream(file)) {
+												fileSize = is.getChannel().size();
+												fileSizeReadingTotalCount.incrementAndGet();
+												fileSizeReadingTotalTime.addAndGet(System.nanoTime() - fileSizeReadingStartTime);
+											}
+
 											long lastModificationDate = file.lastModified();
+											fileMetadataReadingTotalCount.incrementAndGet();
+											fileMetadataReadingTotalTime.addAndGet(System.nanoTime() - fileMetadataReadingStartTime);
 
 											if (checkFileHasBeenAlreadyUploaded(filePath, fileSize, lastModificationDate, null)) {
-												++skippedFilesCount;
-												logger.info("Skipping file [{}], it has been already uploaded", filePath);
+												skippedFilesCount.incrementAndGet();
+												logger.info("Skipping file [{}], it has been already uploaded ([{}] skipped)", filePath, skippedFilesCount);
 												continue;
 											}
 
@@ -268,7 +305,7 @@ public class AzureFolderUpload {
 											String md5HashBase64 = Base64.encode(md5);
 
 											if (checkFileHasBeenAlreadyUploaded(filePath, fileSize, lastModificationDate, md5)) {
-												++skippedFilesCount;
+												skippedFilesCount.incrementAndGet();
 												logger.info("Skipping file [{}], it has been already uploaded", filePath);
 												continue;
 											}
@@ -277,10 +314,10 @@ public class AzureFolderUpload {
 											if (StringUtils.isNotBlank(targetFolder)) {
 												blobItem = FilenameUtils.normalize(String.format("%s/%s", targetFolder, blobItem), true);
 											}
-		
+
 											long fileUploadStartTime = System.currentTimeMillis();
 											CloudBlockBlob blob = container.getBlockBlobReference(blobItem);
-		
+
 											try (InputStream is = contentHolder.getInputStream()) {
 												blob.upload(is, fileSize, null, blobRequestOptions, operationContext);
 											}
@@ -293,13 +330,14 @@ public class AzureFolderUpload {
 												}
 												throw new IOException(String.format("Uploaded file [%s] has wrong hash [%s] but expected [%s]", blob.getUri().toString(), uploadedFileHash, md5HashBase64));
 											}
-		
-											++uploadedFilesCount;
+
+											uploadedFilesCount.incrementAndGet();
 											++threadUploadedFilesCount;
-											uploadedFilesSize += fileSize;
+											uploadedFilesSize.addAndGet(fileSize);
 											threadUploadedFilesSize += fileSize;
 											logger.info("Uploaded file [{}] to [{}] in [{}] ms, totally uploaded [{}] files of [{}] ([{}] skipped), uploaded files size [{}]", file, blob.getUri(), System.currentTimeMillis() - fileUploadStartTime, uploadedFilesCount, filesCount, skippedFilesCount, uploadedFilesSize);
-		
+											logger.debug("Metadata read [{}] times with total time [{}] ms, average time is [{}] ns; file size get [{}] times with total time [{}] ms, average time is [{}] ns", fileMetadataReadingTotalCount, fileMetadataReadingTotalTime.longValue() / 1000000, fileMetadataReadingTotalTime.longValue() / fileMetadataReadingTotalCount.longValue(), fileSizeReadingTotalCount, fileSizeReadingTotalTime.longValue() / 1000000, fileSizeReadingTotalTime.longValue() / fileSizeReadingTotalCount.longValue());
+
 											logUpload(writer, filePath, fileSize, md5, System.currentTimeMillis(), lastModificationDate);
 										} catch (Exception e) {
 											logger.warn(String.format("Failed to upload file [%s]", file), e);
@@ -337,7 +375,7 @@ public class AzureFolderUpload {
 			logger.warn(String.format("Failed to upload folder [%s] to azure container [%s] using [%d] threads and connection string [%s]", sourcePath, targetContainer, uploadThreadsCount, azureConnectionString), e);
 		}
 	}
-	
+
 	private static Collection<File> listFiles(final File directory, final String markerFileName) {
 		Collection<File> files = null;
 		final AtomicInteger skippedFilesCount = new AtomicInteger(0);
@@ -352,7 +390,7 @@ public class AzureFolderUpload {
 						public boolean accept(File dir, String name) {
 							return true;
 						}
-						
+
 						@Override
 						public boolean accept(File file) {
 							if (file.isFile()) {
@@ -390,11 +428,13 @@ public class AzureFolderUpload {
 				File uploadLogFile = new File(path);
 				if (uploadLogFile.exists()) {
 					uploadLogItems = new ArrayList<UploadedFileLogItem>();
+					uploadLogItemPaths = new HashSet<String>();
 					try (InputStream is = new BufferedInputStream(new FileInputStream(uploadLogFile))) {
 						for(String s : IOUtils.readLines(is)) {
 							try {
 								UploadedFileLogItem logItem = csvObjectReader.readValue(s);
 								uploadLogItems.add(logItem);
+								uploadLogItemPaths.add(logItem.getPath());
 							} catch (Exception e) {
 								logger.warn(String.format("Failed to parse upload log item\n%s", s), e);
 							}
@@ -406,7 +446,7 @@ public class AzureFolderUpload {
 			} catch (Exception e) {
 				logger.warn(String.format("Failed to read upload log file [%s]", path), e);
 			}
-		}		
+		}
 	}
 	
 	private static Writer prepareUploadLogWriter(String path) {
