@@ -227,7 +227,7 @@ public class AzureFolderUpload {
 			final Collection<File> files = listFiles(sourceFolder, folderReadyMarkerFileName);
 			if (files != null && !files.isEmpty()) {
 				final Queue<File> queuedFiles = new ConcurrentLinkedQueue<File>(files);
-				final Queue<File> temporarilySkippedFiles = new ConcurrentLinkedQueue<File>(files);
+				final Queue<File> temporarilySkippedFiles = new ConcurrentLinkedQueue<File>();
 				final int filesCount = files.size();
 				logger.debug("Found [{}] files in source folder [{}]", filesCount, sourcePath);
 				try (Writer writer = prepareUploadLogWriter(uploadLogFilePath)) {
@@ -448,7 +448,7 @@ public class AzureFolderUpload {
 			}
 		}
 	}
-	
+
 	private static Writer prepareUploadLogWriter(String path) {
 		if (StringUtils.isNotBlank(path)) {
 			File uploadLogFile = new File(path);
@@ -459,7 +459,7 @@ public class AzureFolderUpload {
 				return Files.newBufferedWriter(uploadLogFile.toPath(), Charsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND, StandardOpenOption.WRITE);
 			} catch (IOException e) {
 				logger.warn(String.format("Failed to create writer for upload log file [%s]", path), e);
-			}			
+			}
 		}
 		return null;
 	}
@@ -474,7 +474,9 @@ public class AzureFolderUpload {
 		logItem.setPath(filePath);
 		logItem.setSize(size);
 		logItem.setUploaded(uploadDate);
-		
+		uploadLogItems.add(logItem);
+		uploadLogItemPaths.add(filePath);
+
 		try {
 			String logItemString = csvObjectWriter.writeValueAsString(logItem);
 			IOUtils.write(logItemString, writer);
